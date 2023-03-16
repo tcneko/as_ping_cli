@@ -11,9 +11,11 @@ import aiohttp
 import asyncio
 import ipaddress
 import json
+import numpy
 import math
 import random
 import re
+import time
 import typer
 
 
@@ -56,7 +58,7 @@ async def scan_prefix_list(prefix_list: list, max_parallel: int):
         async def sem_task(task):
             async with semaphore:
                 return await task
-        aio_task_list.append(asyncio.create_task(sem_task(fping(prefix))))
+        aio_task_list.append(sem_task(fping(prefix)))
     try:
         scan_out_list = await asyncio.gather(*aio_task_list)
     except Exception as e:
@@ -93,18 +95,9 @@ def reduce_prefix_list(prefix_list: list, ipv4_prefix_len: int):
     return reduced_prefix_list
 
 
-def main(asn: int = typer.Option(..., "-a", "--asn", help="AS Number"),
-         sample_num: int = typer.Option(
-             50, "-s", "--sample", help="Number of Sample Prefixes"),
-         max_parallel: int = typer.Option(
-             20, "-p", "--max-parallel", help="Maximum parallel"),
-         verbose: bool = typer.Option(
-             False, "-v", "--verbose", help="Print detail information"),
-         debug: bool = typer.Option(False, help="Debug mode")):
-
-    globals()["debug"] = debug
+async def as_ping(asn, sample_num, max_parallel, verbose, random_seed):
     try:
-        announced_prefix_list = asyncio.run(get_announced_prefix(asn))
+        announced_prefix_list = await get_announced_prefix(asn)
     except:
         json_msg = {"status": "fail",
                     "message": "Fail to get prefix list"}
@@ -117,10 +110,10 @@ def main(asn: int = typer.Option(..., "-a", "--asn", help="AS Number"),
     if sample_num > reduced_prefix_list_len:
         sample_num = reduced_prefix_list_len
 
+    random.seed(random_seed)
     sampled_prefix_list = random.sample(reduced_prefix_list, sample_num)
 
-    scan_out_list = asyncio.run(scan_prefix_list(
-        sampled_prefix_list, max_parallel))
+    scan_out_list = await scan_prefix_list(sampled_prefix_list, max_parallel)
 
     avg_rrt_list = []
     alive_prefix_count = 0
@@ -133,29 +126,45 @@ def main(asn: int = typer.Option(..., "-a", "--asn", help="AS Number"),
             avg_rrt_list.append(scan_out["avg_rrt"])
     avg_rrt_list_len = len(avg_rrt_list)
 
-    total_avg_rrt = 0
-    for avg_rrt in avg_rrt_list:
-        total_avg_rrt += avg_rrt
     sorted_avg_rrt_list = sorted(avg_rrt_list)
     if avg_rrt_list_len != 0:
-        as_avg_rrt = total_avg_rrt / avg_rrt_list_len
-        as_avg_rrt_p50 = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.5)-1]
-        as_avg_rrt_p75 = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.75)-1]
-        as_avg_rrt_p90 = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.9)-1]
-        as_avg_rrt_p95 = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.95)-1]
+        as_avg_rrt = numpy.mean(avg_rrt_list)
+        as_rrt_sd = numpy.std(avg_rrt_list)
+        as_p50_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.5)-1]
+        as_p75_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.75)-1]
+        as_p90_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.9)-1]
+        as_p95_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.95)-1]
     else:
         as_avg_rrt = 0
-        as_avg_rrt_p50 = 0
-        as_avg_rrt_p75 = 0
-        as_avg_rrt_p90 = 0
-        as_avg_rrt_p95 = 0
+        as_rrt_sd = 0
+        as_p50_rrt = 0
+        as_p75_rrt = 0
+        as_p90_rrt = 0
+        as_p95_rrt = 0
 
     json_msg = {"asn": asn,
-                "sampled_prefix_count": sample_num, "alive_prefix_count": alive_prefix_count, "dead_prefix_count": dead_prefix_count,
-                "as_avg_rrt": as_avg_rrt, "as_avg_rrt_p50": as_avg_rrt_p50, "as_avg_rrt_p75": as_avg_rrt_p75, "as_avg_rrt_p90": as_avg_rrt_p90, "as_avg_rrt_p95": as_avg_rrt_p95}
+                "announced_prefix_count": reduced_prefix_list_len, "random_seed": random_seed, "sampled_prefix_count": sample_num,
+                "alive_prefix_count": alive_prefix_count, "dead_prefix_count": dead_prefix_count,
+                "as_avg_rrt": as_avg_rrt, "as_rrt_sd": as_rrt_sd,
+                "as_p50_rrt": as_p50_rrt, "as_p75_rrt": as_p75_rrt, "as_p90_rrt": as_p90_rrt, "as_p95_rrt": as_p95_rrt}
     if verbose:
         json_msg["prefix_result_list"] = scan_out_list
     print(json.dumps(json_msg, indent=2))
+
+
+def main(asn: int = typer.Option(..., "-a", "--asn", help="AS Number"),
+         sample_num: int = typer.Option(
+             50, "-s", "--sample", help="Number of sample prefixes"),
+         max_parallel: int = typer.Option(
+             20, "-p", "--max-parallel", help="Maximum parallel"),
+         verbose: bool = typer.Option(
+             False, "-v", "--verbose", help="Print detail information"),
+         random_seed: int = typer.Option(
+             int(time.time()), "--random-seed", help="Print detail information")):
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(
+        as_ping(asn, sample_num, max_parallel, verbose, random_seed))
+    loop.close()
 
 
 if __name__ == '__main__':
