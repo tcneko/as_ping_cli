@@ -18,6 +18,8 @@ import re
 import time
 import typer
 
+from typing import List
+
 
 # function
 async def fping(prefix: str):
@@ -95,7 +97,39 @@ def reduce_prefix_list(prefix_list: list, ipv4_prefix_len: int):
     return reduced_prefix_list
 
 
-async def as_ping(asn, sample_num, max_parallel, verbose, random_seed):
+async def get_as_name(asn):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://stat.ripe.net/data/whois/data.json?resource=AS" + str(asn)) as response:
+                api_out = await response.json()
+        if len(api_out["data"]["authorities"]) > 0:
+            flat_record_list = [
+                item for sublist in api_out["data"]["records"] for item in sublist]
+            if api_out["data"]["authorities"][0] in ["arin"]:
+                for record in flat_record_list:
+                    if record["key"] == "ASName":
+                        as_name = record["value"]
+                        break
+            elif api_out["data"]["authorities"][0] in ["afrinic", "apnic", "ripe"]:
+                for record in flat_record_list:
+                    if record["key"] == "as-name":
+                        as_name = record["value"]
+                        break
+            elif api_out["data"]["authorities"][0] in ["lacnic"]:
+                for record in flat_record_list:
+                    if record["key"] == "owner":
+                        as_name = record["value"]
+                        break
+            else:
+                as_name = ""
+        else:
+            as_name = ""
+    except:
+        as_name = ""
+    return as_name
+
+
+async def ping_as(asn, sample_num, max_parallel, verbose, random_seed):
     try:
         announced_prefix_list = await get_announced_prefix(asn)
     except:
@@ -132,27 +166,37 @@ async def as_ping(asn, sample_num, max_parallel, verbose, random_seed):
         as_rrt_sd = numpy.std(avg_rrt_list)
         as_p50_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.5)-1]
         as_p75_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.75)-1]
-        as_p90_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.9)-1]
         as_p95_rrt = sorted_avg_rrt_list[math.ceil(avg_rrt_list_len * 0.95)-1]
     else:
         as_avg_rrt = 0
         as_rrt_sd = 0
         as_p50_rrt = 0
         as_p75_rrt = 0
-        as_p90_rrt = 0
         as_p95_rrt = 0
 
-    json_msg = {"asn": asn,
-                "announced_prefix_count": reduced_prefix_list_len, "random_seed": random_seed, "sampled_prefix_count": sample_num,
+    as_name = await get_as_name(asn)
+
+    json_msg = {"asn": asn, "as_name": as_name,
+                "announced_prefix_count": reduced_prefix_list_len, "sampled_prefix_count": sample_num,
                 "alive_prefix_count": alive_prefix_count, "dead_prefix_count": dead_prefix_count,
                 "as_avg_rrt": as_avg_rrt, "as_rrt_sd": as_rrt_sd,
-                "as_p50_rrt": as_p50_rrt, "as_p75_rrt": as_p75_rrt, "as_p90_rrt": as_p90_rrt, "as_p95_rrt": as_p95_rrt}
+                "as_p50_rrt": as_p50_rrt, "as_p75_rrt": as_p75_rrt, "as_p95_rrt": as_p95_rrt}
     if verbose:
         json_msg["prefix_result_list"] = scan_out_list
+    return json_msg
+
+
+async def ping_as_list(asn_list, sample_num, max_parallel, verbose, random_seed):
+    json_msg = {"random_seed": random_seed, "start_timestamp": int(time.time()), "end_timestamp": 0,
+                "result_list": []}
+    for asn in asn_list:
+        ping_out = await ping_as(asn, sample_num, max_parallel, verbose, random_seed)
+        json_msg["result_list"].append(ping_out)
+    json_msg["end_timestamp"] = int(time.time())
     print(json.dumps(json_msg, indent=2))
 
 
-def main(asn: int = typer.Option(..., "-a", "--asn", help="AS Number"),
+def main(asn_list: List[int] = typer.Option(..., "-a", "--asn", help="AS Number"),
          sample_num: int = typer.Option(
              50, "-s", "--sample", help="Number of sample prefixes"),
          max_parallel: int = typer.Option(
@@ -162,8 +206,8 @@ def main(asn: int = typer.Option(..., "-a", "--asn", help="AS Number"),
          random_seed: int = typer.Option(
              int(time.time()), "--random-seed", help="Print detail information")):
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(
-        as_ping(asn, sample_num, max_parallel, verbose, random_seed))
+    loop.run_until_complete(ping_as_list(
+        asn_list, sample_num, max_parallel, verbose, random_seed))
     loop.close()
 
 
